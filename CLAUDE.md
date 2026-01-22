@@ -26,27 +26,80 @@ Key components:
 
 ## Code Structure
 
-Two implementations exist in `model/`:
+Three DDL implementations exist in `model/`:
 
-- **DDL.py**: Expanded state version with matrix hidden states `X ∈ R^{d × d_v}` where `d_v > 1` (default 4). Uses `ResidualShortConvCompressor` to map expanded state back to `R^d` for sublayer input.
+| File | Description | Hidden State |
+|------|-------------|--------------|
+| `DDL.py` | Original expanded state version | `X ∈ R^{d × d_v}` |
+| `DDL-vdim1.py` | Scalar value limit version | `x ∈ R^d` |
+| `DDL_corrected.py` | Theoretically corrected version | `X ∈ R^{d × d_v}` |
 
-- **DDL-vdim1.py**: Scalar value limit version with vector hidden states `x ∈ R^d` (equivalent to `d_v = 1`). Simpler architecture without state compression.
+### DDL_corrected.py - Key Improvements
 
-Both implementations are built on a GPT backbone with Multi-Head Attention + RoPE and SwiGLU MLP.
+The corrected implementation fixes theoretical and stability issues:
+
+| Component | Original (Flawed) | Corrected |
+|-----------|-------------------|-----------|
+| **v (content)** | `W_proj * h_in` (simple linear) | `W_v * Backbone(h_norm)` (deep computation) |
+| **k (direction)** | `Backbone(h_in)` (expensive) | `MLP_light(h_norm)` (lightweight) |
+| **k, β input** | `h_in` (un-normalized) | `h_norm` (RMSNorm normalized) |
+| **k MLP init** | Standard init | ReZero-style (near-zero output layer) |
+
+**Stability fixes:**
+1. Using `h_norm` prevents variance explosion in deep layers
+2. ReZero initialization ensures identity-like behavior at start
+3. Clear separation: `h_norm` → direction/gate, `h_out` → content
+
+## Training
+
+Run experiments comparing original vs corrected DDL on TinyShakespeare:
+
+```bash
+# Train both models and generate comparison plots
+python train.py --model both --max_iters 3000
+
+# Train only corrected model
+python train.py --model corrected --max_iters 5000
+
+# Custom configuration
+python train.py --model both \
+    --hidden_size 256 \
+    --num_layers 6 \
+    --num_heads 4 \
+    --batch_size 64 \
+    --block_size 256 \
+    --learning_rate 3e-4
+```
+
+Outputs saved to `outputs/`:
+- `history_original.json`, `history_corrected.json`: Training logs
+- `loss_comparison.png`: Loss curve comparison plot
 
 ## Dependencies
 
-The code depends on external modules not included in this repo:
-- `.activations`, `.gpt_base`, `.rmsnorm`, `.kv_shift`, `.init_utils`, `.pydantic_config`, `.rotary`, `.shortconv`
+Core dependencies (install via pip):
+- `torch`
+- `transformers`
+- `matplotlib`
 
-These are expected to be available in the parent package when using this as a submodule.
+Utility modules included in `model/`:
+- `rmsnorm.py`: RMSNorm implementation
+- `rotary.py`: Rotary Position Embedding (RoPE)
+- `activations.py`: Activation function utilities
+- `shortconv.py`: Depthwise causal convolution for state compression
+- `kv_shift.py`: KV shift linear layer
+- `init_utils.py`: Weight initialization
+- `pydantic_config.py`: Config validation
+- `gpt_base.py`: Base types (PastKeyValue)
 
 ## Key Configuration Options (GPTConfig)
 
-DDL-specific parameters:
-- `ddl_value_channels`: Expansion factor d_v for matrix states (DDL.py only, default: 4)
+Common DDL parameters:
+- `ddl_value_channels`: Expansion factor d_v (default: 4)
 - `ddl_beta_init`: Initial β value in [0, 2] (default: 1.0)
-- `ddl_k_eps`: Epsilon for k normalization stability
-- `ddl_beta_single_linear`: Use single linear layer for β (vs 2-layer MLP)
-- `ddl_v_sigmoid`: Apply sigmoid activation to v
-- `ddl_v_sigmoid_scale`: Scale factor when using sigmoid on v
+- `ddl_k_eps`: Epsilon for k normalization (default: 1e-5)
+- `ddl_beta_hidden_size`: Hidden size for β MLP (default: 128)
+
+Corrected DDL specific:
+- `ddl_k_mlp_hidden_size`: Hidden size for k MLP (default: hidden_size // 4)
+- `ddl_k_rezero_scale`: ReZero init scale for k MLP (default: 0.01)
